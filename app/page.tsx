@@ -1,5 +1,5 @@
 "use client";
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { nextDifficulty, type Level } from "@/lib/adaptive";
 
 type Question = { question: string; options: string[]; answer: number; concept: string };
@@ -44,22 +44,25 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 
 const fix = (qs: Question[]) => qs.map((q) => ({ ...q, answer: Number(q.answer) }));
 
+const pct = (m?: { right: number; total: number }) =>
+  m ? Math.round((m.right / m.total) * 100) : 0;
+
 function Bars({ mastery }: { mastery: Mastery }) {
   const items = Object.entries(mastery);
   if (!items.length) return null;
   return (
     <div>
       {items.map(([concept, m]) => {
-        const pct = Math.round((m.right / m.total) * 100);
-        const color = pct >= 70 ? "#2e9e5b" : pct >= 40 ? "#d98e04" : "#d64545";
+        const p = pct(m);
+        const color = p >= 70 ? "#2e9e5b" : p >= 40 ? "#d98e04" : "#d64545";
         return (
           <div key={concept} style={{ marginTop: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14 }}>
               <span>{concept}</span>
-              <span>{pct}%</span>
+              <span>{p}%</span>
             </div>
             <div style={{ height: 8, background: "#eee", borderRadius: 4 }}>
-              <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 4 }} />
+              <div style={{ width: `${p}%`, height: "100%", background: color, borderRadius: 4 }} />
             </div>
           </div>
         );
@@ -166,7 +169,8 @@ function QuizRunner({
 
 export default function Home() {
   const [stage, setStage] = useState<Stage>("topic");
-  const [topic, setTopic] = useState("Python loops");
+  const [topic, setTopic] = useState("");
+  const [asked, setAsked] = useState<string[]>([]);
   const [level, setLevel] = useState<Level>("medium");
   const [nextLevel, setNextLevel] = useState<Level>("medium");
   const [round, setRound] = useState(0);
@@ -177,8 +181,25 @@ export default function Home() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [practice, setPractice] = useState<Question[]>([]);
   const [mastery, setMastery] = useState<Mastery>({});
+  const [before, setBefore] = useState<Mastery>({});
+  const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("tutor-mastery");
+      if (saved) setMastery(JSON.parse(saved));
+    } catch {}
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      localStorage.setItem("tutor-mastery", JSON.stringify(mastery));
+    } catch {}
+  }, [mastery, loaded]);
 
   function updateMastery(outcomes: { concept: string; correct: boolean }[]) {
     setMastery((prev) => {
@@ -195,9 +216,14 @@ export default function Home() {
     setError("");
     setLoading(true);
     try {
-      const data = await post<{ questions: Question[] }>("/api/quiz", { topic, difficulty: lv });
+      const data = await post<{ questions: Question[] }>("/api/quiz", {
+        topic: topic.trim(),
+        difficulty: lv,
+        avoid: asked,
+      });
       if (!data.questions.length) throw new Error("empty");
       setQuestions(fix(data.questions));
+      setAsked((prev) => [...prev, ...data.questions.map((q) => q.question)].slice(-30));
       setRound((r) => r + 1);
       setStage("quiz");
     } catch {
@@ -230,6 +256,7 @@ export default function Home() {
     setError("");
     setLoading(true);
     try {
+      setBefore(mastery);
       const top = weak.slice(0, 2);
       const out = await Promise.all(
         top.map((w) =>
@@ -277,9 +304,9 @@ export default function Home() {
 
   function reset() {
     setStage("topic");
+    setAsked([]);
     setLevel("medium");
     setNextLevel("medium");
-    setMastery({});
     setResult(null);
     setPracticeResult(null);
     setWeak([]);
@@ -306,7 +333,11 @@ export default function Home() {
             <p style={{ marginTop: 0 }}>What do you want to learn?</p>
             <input
               value={topic}
-              onChange={(e) => setTopic(e.target.value)}
+              placeholder="e.g. Photosynthesis, Fractions, Python loops"
+              onChange={(e) => {
+                setTopic(e.target.value);
+                setAsked([]);
+              }}
               style={{
                 width: "100%",
                 padding: 10,
@@ -317,6 +348,31 @@ export default function Home() {
                 background: "#fff",
               }}
             />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+              {["Python loops", "Photosynthesis", "Fractions", "World War II", "Newton's laws"].map(
+                (t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => {
+                      setTopic(t);
+                      setAsked([]);
+                    }}
+                    style={{
+                      background: "#f0f0f2",
+                      color: "#111",
+                      border: "1px solid #ddd",
+                      borderRadius: 999,
+                      padding: "6px 12px",
+                      cursor: "pointer",
+                      fontSize: 13,
+                    }}
+                  >
+                    {t}
+                  </button>
+                )
+              )}
+            </div>
             <div style={{ marginTop: 16 }}>
               <button
                 style={btn}
@@ -326,6 +382,18 @@ export default function Home() {
                 {loading ? "Creating your quiz..." : "Start diagnostic"}
               </button>
             </div>
+            {Object.keys(mastery).length > 0 && (
+              <div style={{ marginTop: 24 }}>
+                <h3 style={{ marginBottom: 0 }}>Your saved progress</h3>
+                <Bars mastery={mastery} />
+                <button
+                  style={{ ...btn, background: "#666", marginTop: 16, fontSize: 13, padding: "6px 12px" }}
+                  onClick={() => setMastery({})}
+                >
+                  Clear saved progress
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -400,6 +468,16 @@ export default function Home() {
             <h2 style={{ marginTop: 0 }}>
               Practice: {practiceResult.score} / {practiceResult.total}
             </h2>
+            <h3>What changed</h3>
+            {Object.keys(mastery).map((c) => (
+              <p key={c} style={{ margin: "4px 0", fontSize: 14 }}>
+                {c}:{" "}
+                <b>
+                  {before[c] ? `${pct(before[c])}% → ` : "new: "}
+                  {pct(mastery[c])}%
+                </b>
+              </p>
+            ))}
             <h3>Concept mastery</h3>
             <Bars mastery={mastery} />
             <p style={{ marginTop: 20 }}>

@@ -10,3 +10,19 @@ export function parseJson(text: string) {
   const end = cleaned.lastIndexOf("}");
   return JSON.parse(cleaned.slice(start, end + 1));
 }
+
+export async function askJson(prompt: string, tries = 2) {
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await groq.chat.completions.create({
+        model: MODEL,
+        messages: [{ role: "user", content: prompt }],
+      });
+      return parseJson(res.choices[0].message.content ?? "{}");
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}

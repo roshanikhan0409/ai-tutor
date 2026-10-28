@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { groq, MODEL, parseJson } from "@/lib/ai";
+import { askJson } from "@/lib/ai";
+import { fallbackLesson } from "@/lib/fallback";
 
 export async function POST(req: Request) {
   const { topic, concept, why, difficulty = "medium" } = await req.json();
@@ -17,18 +18,13 @@ Return ONLY a JSON object in exactly this format, with no other text:
 "answer" is the index (0-3) of the correct option.`;
 
   try {
-    const res = await groq.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    const data = parseJson(res.choices[0].message.content ?? "{}");
-    return NextResponse.json({
-      lesson: data.lesson ?? "",
-      practice: data.practice ?? [],
-    });
+    const data = await askJson(prompt);
+    if (!data.lesson || !Array.isArray(data.practice) || data.practice.length === 0) {
+      throw new Error("Bad lesson");
+    }
+    return NextResponse.json({ lesson: data.lesson, practice: data.practice });
   } catch (err) {
     console.error(err);
-    return NextResponse.json({ error: "Lesson generation failed" }, { status: 500 });
+    return NextResponse.json(fallbackLesson(concept));
   }
 }

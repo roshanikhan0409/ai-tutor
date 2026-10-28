@@ -1,36 +1,39 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI Tutor
 
-## Getting Started
+An adaptive study app that turns a topic into a learning loop: take a quiz, find the concepts you missed, review short targeted lessons, and practice until your understanding improves.
 
-First, run the development server:
+## How It Works
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+1. Choose a topic and take a five-question multiple-choice quiz.
+2. Get an adaptive difficulty for the next round and an analysis of missed concepts.
+3. Review short lessons that can include prerequisite concepts, then answer focused practice questions.
+4. Track concept mastery across visits. Progress is saved in your browser.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Quiz questions, gap analysis, and lessons are generated with Groq. A built-in quiz and a simpler gap-analysis fallback keep parts of the app usable if AI generation is unavailable; lesson generation requires a working Groq API key.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Run Locally
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+**Requirements:** Node.js and npm, plus a [Groq API key](https://console.groq.com/keys).
 
-## Learn More
+1. Install dependencies with `npm install`.
+2. Create `.env.local` in the project root and add `GROQ_API_KEY=your_groq_api_key`.
+3. Start the development server with `npm run dev`.
 
-To learn more about Next.js, take a look at the following resources:
+Open [http://localhost:3000](http://localhost:3000). Keep the API key on the server; do not expose it in client-side code or commit `.env.local`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Project Layout
 
-## Deploy on Vercel
+| Path | Purpose |
+| --- | --- |
+| `app/page.tsx` | Tutor interface and adaptive learning flow |
+| `app/api/quiz/route.ts` | Quiz generation |
+| `app/api/gaps/route.ts` | Missed-concept analysis |
+| `app/api/lesson/route.ts` | Targeted lesson and practice generation |
+| `lib/adaptive.ts` | Difficulty and mastery calculations |
+| `lib/ai.ts` | Groq requests and JSON parsing |
+| `lib/fallback.ts` | Built-in quiz fallback |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Built With
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Next.js, React, TypeScript, and the Groq API.

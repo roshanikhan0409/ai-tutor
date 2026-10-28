@@ -10,8 +10,28 @@ type Result = {
   wrong: Wrong[];
   outcomes: { concept: string; correct: boolean }[];
 };
-type Weak = { concept: string; why: string };
-type Lesson = { concept: string; lesson: string; practice: Question[] };
+type Weak = {
+  concept: string;
+  why: string;
+  prerequisite?: string | null;
+  chain?: string[];
+  confidence?: "high" | "medium" | "low";
+  missed?: number;
+};
+type Step = {
+  concept: string;
+  why: string;
+  role: "prerequisite" | "gap";
+  forConcept: string;
+};
+type Lesson = {
+  concept: string;
+  lesson: string;
+  practice: Question[];
+  role: "prerequisite" | "gap";
+  reason: string;
+  difficulty: Level;
+};
 type Mastery = Record<string, { right: number; total: number }>;
 type Stage = "topic" | "quiz" | "results" | "lesson" | "practice" | "progress";
 
@@ -31,6 +51,13 @@ const btn: CSSProperties = {
   cursor: "pointer",
   fontSize: 15,
 };
+const tag: CSSProperties = {
+  fontSize: 11,
+  padding: "2px 8px",
+  borderRadius: 999,
+  color: "#333",
+  marginLeft: 8,
+};
 
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -46,6 +73,38 @@ const fix = (qs: Question[]) => qs.map((q) => ({ ...q, answer: Number(q.answer) 
 
 const pct = (m?: { right: number; total: number }) =>
   m ? Math.round((m.right / m.total) * 100) : 0;
+
+const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+const MAX_STEPS = 4;
+
+// Turns the gap analysis into an ordered curriculum: prerequisites come first,
+// then the concept that depends on them. Caps the path so lessons stay short.
+function buildPlan(weak: Weak[]): Step[] {
+  const seen = new Set<string>();
+  const steps: Step[] = [];
+
+  for (const w of weak) {
+    const chain = w.chain && w.chain.length ? w.chain : [w.concept];
+    const group: Step[] = [];
+    chain.forEach((c, i) => {
+      if (seen.has(key(c))) return;
+      const isTarget = i === chain.length - 1;
+      group.push({
+        concept: c,
+        why: isTarget ? w.why : `Foundation you need before "${w.concept}".`,
+        role: isTarget ? "gap" : "prerequisite",
+        forConcept: w.concept,
+      });
+    });
+
+    // Always keep the first group; add later ones only if they still fit.
+    if (steps.length > 0 && steps.length + group.length > MAX_STEPS) continue;
+    group.forEach((s) => seen.add(key(s.concept)));
+    steps.push(...group);
+  }
+  return steps;
+}
 
 function Bars({ mastery }: { mastery: Mastery }) {
   const items = Object.entries(mastery);
@@ -212,6 +271,16 @@ export default function Home() {
     });
   }
 
+  // Drill difficulty follows the student's current mastery of that concept.
+  function drillLevel(concept: string): Level {
+    const m = mastery[concept];
+    if (!m) return level;
+    const p = pct(m);
+    if (p < 40) return "easy";
+    if (p < 70) return "medium";
+    return level;
+  }
+
   async function startQuiz(lv: Level) {
     setError("");
     setLoading(true);
@@ -257,22 +326,28 @@ export default function Home() {
     setLoading(true);
     try {
       setBefore(mastery);
-      const top = weak.slice(0, 2);
+      const plan = buildPlan(weak);
       const out = await Promise.all(
-        top.map((w) =>
+        plan.map((step) =>
           post<{ lesson: string; practice: Question[] }>("/api/lesson", {
             topic,
-            concept: w.concept,
-            why: w.why,
-            difficulty: level,
+            concept: step.concept,
+            why: step.why,
+            role: step.role,
+            forConcept: step.forConcept,
+            difficulty: drillLevel(step.concept),
+            mastery: mastery[step.concept] ? pct(mastery[step.concept]) : null,
           })
         )
       );
       setLessons(
         out.map((l, idx) => ({
-          concept: top[idx].concept,
+          concept: plan[idx].concept,
           lesson: l.lesson,
           practice: fix(l.practice),
+          role: plan[idx].role,
+          reason: plan[idx].why,
+          difficulty: drillLevel(plan[idx].concept),
         }))
       );
       setStage("lesson");
@@ -414,15 +489,37 @@ export default function Home() {
               <>
                 <h3>Your knowledge gaps</h3>
                 {weak.map((w) => (
-                  <p key={w.concept}>
+                  <div key={w.concept} style={{ marginTop: 14 }}>
                     <b>{w.concept}</b>
+                    {w.confidence && (
+                      <span
+                        style={{
+                          ...tag,
+                          background:
+                            w.confidence === "high"
+                              ? "#fdeaea"
+                              : w.confidence === "medium"
+                                ? "#fff4d6"
+                                : "#eee",
+                        }}
+                      >
+                        {w.confidence} confidence
+                      </span>
+                    )}
                     <br />
                     <span style={{ color: "#555" }}>{w.why}</span>
-                  </p>
+                    {w.chain && w.chain.length > 1 && (
+                      <div style={{ marginTop: 6, fontSize: 13, color: "#777" }}>
+                        Learning path: {w.chain.join(" → ")}
+                      </div>
+                    )}
+                  </div>
                 ))}
-                <button style={btn} disabled={loading} onClick={startLesson}>
-                  Start my personalized lesson
-                </button>
+                <div style={{ marginTop: 16 }}>
+                  <button style={btn} disabled={loading} onClick={startLesson}>
+                    Start my personalized lesson
+                  </button>
+                </div>
               </>
             ) : (
               <>
@@ -443,9 +540,30 @@ export default function Home() {
 
         {stage === "lesson" && (
           <div>
-            {lessons.map((l) => (
+            <div style={card}>
+              <h3 style={{ marginTop: 0 }}>Your learning path</h3>
+              <p style={{ margin: 0, color: "#555" }}>
+                {lessons.map((l) => l.concept).join(" → ")}
+              </p>
+            </div>
+            {lessons.map((l, idx) => (
               <div key={l.concept} style={card}>
-                <h3 style={{ marginTop: 0 }}>{l.concept}</h3>
+                <div style={{ fontSize: 12, color: "#777" }}>
+                  Step {idx + 1} of {lessons.length}
+                </div>
+                <h3 style={{ margin: "4px 0 0" }}>
+                  {l.concept}
+                  <span
+                    style={{
+                      ...tag,
+                      background: l.role === "prerequisite" ? "#e8f0fe" : "#fdeaea",
+                    }}
+                  >
+                    {l.role === "prerequisite" ? "prerequisite" : "your gap"}
+                  </span>
+                  <span style={{ ...tag, background: "#eee" }}>{l.difficulty} drills</span>
+                </h3>
+                <p style={{ margin: "6px 0 0", fontSize: 13, color: "#777" }}>{l.reason}</p>
                 <p style={{ lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{l.lesson}</p>
               </div>
             ))}

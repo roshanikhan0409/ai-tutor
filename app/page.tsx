@@ -1,8 +1,22 @@
 "use client";
 import { useEffect, useState, type CSSProperties } from "react";
-import { nextDifficulty, type Level } from "@/lib/adaptive";
+import {
+  nextDifficulty,
+  applyAnswer,
+  pctOf,
+  buildVerdicts,
+  START_SCORE,
+  type Level,
+  type ConceptMastery,
+} from "@/lib/adaptive";
 
-type Question = { question: string; options: string[]; answer: number; concept: string };
+type Question = {
+  question: string;
+  options: string[];
+  answer: number;
+  concept: string;
+  level?: Level;
+};
 type Wrong = { question: string; chosen: string; correct: string; concept: string };
 type Result = {
   score: number;
@@ -29,10 +43,11 @@ type Lesson = {
   lesson: string;
   practice: Question[];
   role: "prerequisite" | "gap";
+  forConcept: string;
   reason: string;
   difficulty: Level;
 };
-type Mastery = Record<string, { right: number; total: number }>;
+type Mastery = Record<string, ConceptMastery>;
 type Stage = "topic" | "quiz" | "results" | "lesson" | "practice" | "progress";
 
 const card: CSSProperties = {
@@ -59,6 +74,10 @@ const tag: CSSProperties = {
   marginLeft: 8,
 };
 
+const GOOD = "#2e9e5b";
+const WARN = "#d98e04";
+const BAD = "#d64545";
+
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -69,13 +88,15 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 const fix = (qs: Question[]) => qs.map((q) => ({ ...q, answer: Number(q.answer) }));
 
-const pct = (m?: { right: number; total: number }) =>
-  m ? Math.round((m.right / m.total) * 100) : 0;
+// Canonical concept key: "Loop-Else", "loop_else" and "loop else" are all the same concept.
+const canon = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const label = (k: string) => (k ? k.charAt(0).toUpperCase() + k.slice(1) : k);
 
-const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-
+const LEVELS: Level[] = ["easy", "medium", "hard"];
 const MAX_STEPS = 4;
 
 // Turns the gap analysis into an ordered curriculum: prerequisites come first,
@@ -88,7 +109,7 @@ function buildPlan(weak: Weak[]): Step[] {
     const chain = w.chain && w.chain.length ? w.chain : [w.concept];
     const group: Step[] = [];
     chain.forEach((c, i) => {
-      if (seen.has(key(c))) return;
+      if (seen.has(canon(c))) return;
       const isTarget = i === chain.length - 1;
       group.push({
         concept: c,
@@ -98,12 +119,36 @@ function buildPlan(weak: Weak[]): Step[] {
       });
     });
 
-    // Always keep the first group; add later ones only if they still fit.
     if (steps.length > 0 && steps.length + group.length > MAX_STEPS) continue;
-    group.forEach((s) => seen.add(key(s.concept)));
+    group.forEach((s) => seen.add(canon(s.concept)));
     steps.push(...group);
   }
   return steps;
+}
+
+// Saved progress may come from an older version (no live score, differently
+// spelled concept names) or be corrupted. Normalize keys and merge duplicates.
+function sanitizeMastery(raw: unknown): Mastery {
+  const out: Mastery = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [concept, v] of Object.entries(raw as Record<string, unknown>)) {
+    const m = v as Partial<ConceptMastery>;
+    if (typeof m?.right !== "number" || typeof m?.total !== "number" || m.total <= 0) continue;
+    const k = canon(concept);
+    if (!k) continue;
+    const prev = out[k];
+    if (prev) {
+      // Merging variants: the live score is dropped and re-derived from the counts.
+      out[k] = { right: prev.right + m.right, total: prev.total + m.total };
+    } else {
+      out[k] = {
+        right: m.right,
+        total: m.total,
+        ...(typeof m.score === "number" ? { score: m.score } : {}),
+      };
+    }
+  }
+  return out;
 }
 
 function Bars({ mastery }: { mastery: Mastery }) {
@@ -112,16 +157,24 @@ function Bars({ mastery }: { mastery: Mastery }) {
   return (
     <div>
       {items.map(([concept, m]) => {
-        const p = pct(m);
-        const color = p >= 70 ? "#2e9e5b" : p >= 40 ? "#d98e04" : "#d64545";
+        const p = pctOf(m);
+        const color = p >= 70 ? GOOD : p >= 40 ? WARN : BAD;
         return (
           <div key={concept} style={{ marginTop: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14 }}>
-              <span>{concept}</span>
+              <span>{label(concept)}</span>
               <span>{p}%</span>
             </div>
             <div style={{ height: 8, background: "#eee", borderRadius: 4 }}>
-              <div style={{ width: `${p}%`, height: "100%", background: color, borderRadius: 4 }} />
+              <div
+                style={{
+                  width: `${p}%`,
+                  height: "100%",
+                  background: color,
+                  borderRadius: 4,
+                  transition: "width 0.4s",
+                }}
+              />
             </div>
           </div>
         );
@@ -132,15 +185,34 @@ function Bars({ mastery }: { mastery: Mastery }) {
 
 function QuizRunner({
   questions,
+  mastery,
+  onAnswer,
   onFinish,
 }: {
   questions: Question[];
+  mastery: Mastery;
+  onAnswer: (concept: string, correct: boolean, level: Level) => void;
   onFinish: (r: Result) => void;
 }) {
   const [i, setI] = useState(0);
   const [picked, setPicked] = useState<number | null>(null);
+  const [shift, setShift] = useState<{ from: number; to: number } | null>(null);
   const [log, setLog] = useState<{ q: Question; chosen: number }[]>([]);
   const q = questions[i];
+
+  // Recalibrate this concept's mastery the moment the student answers.
+  function choose(j: number) {
+    if (picked !== null) return;
+    const correct = j === q.answer;
+    const lv = q.level ?? "medium";
+    const cur = mastery[canon(q.concept)];
+    setPicked(j);
+    setShift({
+      from: cur ? pctOf(cur) : START_SCORE,
+      to: pctOf(applyAnswer(cur, correct, lv)),
+    });
+    onAnswer(q.concept, correct, lv);
+  }
 
   function next() {
     const newLog = [...log, { q, chosen: picked as number }];
@@ -148,6 +220,7 @@ function QuizRunner({
       setLog(newLog);
       setI(i + 1);
       setPicked(null);
+      setShift(null);
       return;
     }
     const wrong = newLog
@@ -188,17 +261,17 @@ function QuizRunner({
         if (picked !== null) {
           if (j === q.answer) {
             bg = "#e6f6ec";
-            border = "#2e9e5b";
+            border = GOOD;
           } else if (j === picked) {
             bg = "#fdeaea";
-            border = "#d64545";
+            border = BAD;
           }
         }
         return (
           <button
             key={j}
             disabled={picked !== null}
-            onClick={() => setPicked(j)}
+            onClick={() => choose(j)}
             style={{
               display: "block",
               width: "100%",
@@ -217,8 +290,14 @@ function QuizRunner({
           </button>
         );
       })}
+      {picked !== null && shift && (
+        <p style={{ marginTop: 14, fontSize: 14, color: "#555" }}>
+          Mastery of <b>{label(canon(q.concept))}</b>: {shift.from}% →{" "}
+          <b style={{ color: shift.to >= shift.from ? GOOD : BAD }}>{shift.to}%</b>
+        </p>
+      )}
       {picked !== null && (
-        <button style={{ ...btn, marginTop: 16 }} onClick={next}>
+        <button style={{ ...btn, marginTop: 8 }} onClick={next}>
           {i + 1 < questions.length ? "Next" : "Finish"}
         </button>
       )}
@@ -248,7 +327,7 @@ export default function Home() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem("tutor-mastery");
-      if (saved) setMastery(JSON.parse(saved));
+      if (saved) setMastery(sanitizeMastery(JSON.parse(saved)));
     } catch {}
     setLoaded(true);
   }, []);
@@ -260,43 +339,69 @@ export default function Home() {
     } catch {}
   }, [mastery, loaded]);
 
-  function updateMastery(outcomes: { concept: string; correct: boolean }[]) {
-    setMastery((prev) => {
-      const copy: Mastery = { ...prev };
-      for (const o of outcomes) {
-        const cur = copy[o.concept] ?? { right: 0, total: 0 };
-        copy[o.concept] = { right: cur.right + (o.correct ? 1 : 0), total: cur.total + 1 };
-      }
-      return copy;
-    });
+  // Called after every single answer, so mastery is always current.
+  function recordAnswer(concept: string, correct: boolean, lv: Level) {
+    const k = canon(concept);
+    if (!k) return;
+    setMastery((prev) => ({ ...prev, [k]: applyAnswer(prev[k], correct, lv) }));
   }
 
   // Drill difficulty follows the student's current mastery of that concept.
   function drillLevel(concept: string): Level {
-    const m = mastery[concept];
+    const m = mastery[canon(concept)];
     if (!m) return level;
-    const p = pct(m);
+    const p = pctOf(m);
     if (p < 40) return "easy";
     if (p < 70) return "medium";
     return level;
   }
 
+  // Feedback loop result for the round (only meaningful on the progress screen).
+  const verdicts =
+    stage === "progress"
+      ? buildVerdicts(
+          lessons.map((l) => ({
+            concept: canon(l.concept),
+            role: l.role,
+            forConcept: l.forConcept,
+          })),
+          before,
+          mastery
+        )
+      : [];
+  const gapVerdicts = verdicts.filter((v) => v.role === "gap");
+  const hasBadGap = gapVerdicts.some((v) => v.tone === "bad");
+  const allGapsGood = gapVerdicts.length > 0 && gapVerdicts.every((v) => v.tone === "good");
+
+  // Never raise the difficulty while a gap is still unresolved.
+  const plannedLevel: Level =
+    hasBadGap && LEVELS.indexOf(nextLevel) > LEVELS.indexOf(level) ? level : nextLevel;
+
   async function startQuiz(lv: Level) {
     setError("");
     setLoading(true);
     try {
-      const data = await post<{ questions: Question[] }>("/api/quiz", {
+      const body = {
         topic: topic.trim(),
         difficulty: lv,
         avoid: asked,
-      });
+        concepts: Object.keys(mastery).slice(-12),
+      };
+      let data: { questions: Question[] };
+      try {
+        data = await post<{ questions: Question[] }>("/api/quiz", body);
+      } catch {
+        // One automatic retry covers brief rate limits and malformed model output.
+        await sleep(3000);
+        data = await post<{ questions: Question[] }>("/api/quiz", body);
+      }
       if (!data.questions.length) throw new Error("empty");
-      setQuestions(fix(data.questions));
+      setQuestions(fix(data.questions).map((q) => ({ ...q, level: lv })));
       setAsked((prev) => [...prev, ...data.questions.map((q) => q.question)].slice(-30));
       setRound((r) => r + 1);
       setStage("quiz");
     } catch {
-      setError("Could not generate the quiz. Check the terminal for the error and try again.");
+      setError("Could not generate the quiz. Please try again in a moment.");
     } finally {
       setLoading(false);
     }
@@ -304,7 +409,6 @@ export default function Home() {
 
   async function onQuizFinish(r: Result) {
     setResult(r);
-    updateMastery(r.outcomes);
     setNextLevel(nextDifficulty(level, r.score, r.total));
     setWeak([]);
     setStage("results");
@@ -314,7 +418,10 @@ export default function Home() {
       const g = await post<{ weak_concepts: Weak[] }>("/api/gaps", { topic, wrong: r.wrong });
       setWeak(g.weak_concepts);
     } catch {
-      const concepts = [...new Set(r.wrong.map((w) => w.concept))];
+      const seen = new Set<string>();
+      const concepts = r.wrong
+        .map((w) => w.concept)
+        .filter((c) => !seen.has(canon(c)) && seen.add(canon(c)));
       setWeak(concepts.map((c) => ({ concept: c, why: "You missed questions on this concept." })));
     } finally {
       setLoading(false);
@@ -327,16 +434,17 @@ export default function Home() {
     try {
       setBefore(mastery);
       const plan = buildPlan(weak);
+      const levels = plan.map((s) => drillLevel(s.concept));
       const out = await Promise.all(
-        plan.map((step) =>
+        plan.map((step, idx) =>
           post<{ lesson: string; practice: Question[] }>("/api/lesson", {
             topic,
             concept: step.concept,
             why: step.why,
             role: step.role,
             forConcept: step.forConcept,
-            difficulty: drillLevel(step.concept),
-            mastery: mastery[step.concept] ? pct(mastery[step.concept]) : null,
+            difficulty: levels[idx],
+            mastery: mastery[canon(step.concept)] ? pctOf(mastery[canon(step.concept)]) : null,
           })
         )
       );
@@ -344,15 +452,16 @@ export default function Home() {
         out.map((l, idx) => ({
           concept: plan[idx].concept,
           lesson: l.lesson,
-          practice: fix(l.practice),
+          practice: fix(l.practice).map((q) => ({ ...q, level: levels[idx] })),
           role: plan[idx].role,
+          forConcept: plan[idx].forConcept,
           reason: plan[idx].why,
-          difficulty: drillLevel(plan[idx].concept),
+          difficulty: levels[idx],
         }))
       );
       setStage("lesson");
     } catch {
-      setError("Could not write the lesson. Check the terminal and try again.");
+      setError("Could not write the lesson. Please try again in a moment.");
     } finally {
       setLoading(false);
     }
@@ -366,15 +475,15 @@ export default function Home() {
   }
 
   function onPracticeFinish(r: Result) {
-    updateMastery(r.outcomes);
     setPracticeResult(r);
     if (result) setNextLevel(nextDifficulty(level, result.score + r.score, result.total + r.total));
     setStage("progress");
   }
 
   function nextRound() {
-    setLevel(nextLevel);
-    startQuiz(nextLevel);
+    const target = stage === "progress" ? plannedLevel : nextLevel;
+    setLevel(target);
+    startQuiz(target);
   }
 
   function reset() {
@@ -388,6 +497,8 @@ export default function Home() {
     setLessons([]);
   }
 
+  const toneColor = (t: "good" | "ok" | "bad") => (t === "good" ? GOOD : t === "ok" ? WARN : BAD);
+
   return (
     <main style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111", padding: "32px 16px" }}>
       <div style={{ maxWidth: 640, margin: "0 auto" }}>
@@ -398,7 +509,7 @@ export default function Home() {
         </p>
 
         {error && (
-          <div style={{ ...card, background: "#fdeaea", borderColor: "#d64545", color: "#8a1f1f" }}>
+          <div style={{ ...card, background: "#fdeaea", borderColor: BAD, color: "#8a1f1f" }}>
             {error}
           </div>
         )}
@@ -474,7 +585,13 @@ export default function Home() {
 
         {stage === "quiz" && (
           <div style={card}>
-            <QuizRunner key={`quiz-${round}`} questions={questions} onFinish={onQuizFinish} />
+            <QuizRunner
+              key={`quiz-${round}`}
+              questions={questions}
+              mastery={mastery}
+              onAnswer={recordAnswer}
+              onFinish={onQuizFinish}
+            />
           </div>
         )}
 
@@ -524,8 +641,8 @@ export default function Home() {
             ) : (
               <>
                 <p>No gaps found. Great work!</p>
-                <button style={btn} onClick={nextRound}>
-                  Next round ({nextLevel})
+                <button style={btn} disabled={loading} onClick={nextRound}>
+                  {loading ? "Creating your quiz..." : `Next round (${nextLevel})`}
                 </button>
               </>
             )}
@@ -577,7 +694,13 @@ export default function Home() {
 
         {stage === "practice" && (
           <div style={card}>
-            <QuizRunner key="practice" questions={practice} onFinish={onPracticeFinish} />
+            <QuizRunner
+              key="practice"
+              questions={practice}
+              mastery={mastery}
+              onAnswer={recordAnswer}
+              onFinish={onPracticeFinish}
+            />
           </div>
         )}
 
@@ -586,20 +709,48 @@ export default function Home() {
             <h2 style={{ marginTop: 0 }}>
               Practice: {practiceResult.score} / {practiceResult.total}
             </h2>
-            <h3>What changed</h3>
-            {Object.keys(mastery).map((c) => (
-              <p key={c} style={{ margin: "4px 0", fontSize: 14 }}>
-                {c}:{" "}
-                <b>
-                  {before[c] ? `${pct(before[c])}% → ` : "new: "}
-                  {pct(mastery[c])}%
-                </b>
-              </p>
+
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 8,
+                background: allGapsGood ? "#e6f6ec" : hasBadGap ? "#fdeaea" : "#fff4d6",
+                fontSize: 14,
+              }}
+            >
+              {allGapsGood
+                ? "You have mastered the gaps from this round. Time to level up."
+                : hasBadGap
+                  ? "Some gaps are still weak. The next round stays at this level and revisits them."
+                  : "Good progress. One more round will lock these concepts in."}
+            </div>
+
+            <h3>What to do next</h3>
+            {verdicts.map((v) => (
+              <div
+                key={v.concept}
+                style={{
+                  marginTop: 10,
+                  paddingLeft: 12,
+                  borderLeft: `4px solid ${toneColor(v.tone)}`,
+                }}
+              >
+                <div style={{ fontSize: 14 }}>
+                  <b>{label(v.concept)}</b>
+                  <span style={{ ...tag, background: "#eee" }}>
+                    {v.role === "prerequisite" ? "prerequisite" : "gap"}
+                  </span>{" "}
+                  {v.from !== null ? `${v.from}% → ` : "new: "}
+                  <b>{v.to}%</b>
+                </div>
+                <div style={{ fontSize: 13, color: "#555", marginTop: 2 }}>{v.message}</div>
+              </div>
             ))}
+
             <h3>Concept mastery</h3>
             <Bars mastery={mastery} />
             <p style={{ marginTop: 20 }}>
-              Next quiz difficulty: <b>{nextLevel}</b>
+              Next quiz difficulty: <b>{plannedLevel}</b>
             </p>
             <button style={btn} disabled={loading} onClick={nextRound}>
               {loading ? "Creating your quiz..." : "Start next round"}

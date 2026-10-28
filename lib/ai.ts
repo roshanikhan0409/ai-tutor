@@ -14,12 +14,14 @@ export function parseJson(text: string) {
   try {
     return JSON.parse(body);
   } catch {
-    // Common LLM slip: trailing commas before a closing bracket.
     return JSON.parse(body.replace(/,\s*([}\]])/g, "$1"));
   }
 }
 
-// Calls the model and returns parsed JSON, retrying when the output is malformed.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Calls the model and returns parsed JSON. Retries on malformed output,
+// and waits longer when Groq returns a rate-limit (429) error.
 export async function askJson(prompt: string, tries = 3) {
   let lastError: unknown;
   for (let i = 0; i < tries; i++) {
@@ -33,6 +35,10 @@ export async function askJson(prompt: string, tries = 3) {
     } catch (err) {
       lastError = err;
       console.error(`askJson attempt ${i + 1}/${tries} failed:`, err);
+      if (i < tries - 1) {
+        const status = (err as { status?: number })?.status;
+        await sleep(status === 429 ? 4000 * (i + 1) : 500);
+      }
     }
   }
   throw lastError;
